@@ -14,7 +14,7 @@ $ git clone https://github.com/helloyi/ngxSyslogRaiseLevel.git
 2. 下载 tengine-2.0.3
 $ wget http://tengine.taobao.org/download/tengine-2.0.3.tar.gz
 $ tar zxvf tengine-2.0.3.tar.gz
-$ cd tengine-2.0.3.tar.gz
+$ cd tengine-2.0.3
 
 3. 打补丁
 $ patch -p1 < /path/to/the/patch/directory/tengine-syslog-raiselevel-2.0.3.patch

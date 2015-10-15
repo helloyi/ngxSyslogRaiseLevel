@@ -1,0 +1,372 @@
+diff -ruN tengine-2.0.3-orig/src/core/ngx_log.c tengine-2.0.3/src/core/ngx_log.c
+--- tengine-2.0.3-orig/src/core/ngx_log.c	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/core/ngx_log.c	2014-11-21 19:58:29.632128244 +0800
+@@ -370,10 +370,11 @@
+     return &ngx_log;
+ }
+ 
+-
+ ngx_log_t *
+-ngx_log_create(ngx_cycle_t *cycle, ngx_str_t *name)
++ngx_log_create(ngx_conf_t *cf, ngx_str_t *name)
+ {
++    ngx_cycle_t     *cycle = cf->cycle;
++
+     ngx_log_t  *log;
+     ngx_int_t   rc;
+     ngx_str_t   full;
+@@ -382,8 +383,7 @@
+     if (log == NULL) {
+         return NULL;
+     }
+-
+-    rc = ngx_log_target(cycle, name, log);
++    rc = ngx_log_target(cf, name, log);
+ 
+     if (rc == NGX_ERROR) {
+         return NULL;
+@@ -479,7 +479,7 @@
+ 
+     value = cf->args->elts;
+ 
+-    rc = ngx_log_target(cf->cycle, &value[1], &cf->cycle->new_log);
++    rc = ngx_log_target(cf, &value[1], &cf->cycle->new_log);
+ 
+     if (rc == NGX_ERROR) {
+         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+@@ -518,10 +518,10 @@
+     return ngx_log_set_levels(cf, &cf->cycle->new_log);
+ }
+ 
+-
+ ngx_int_t
+-ngx_log_target(ngx_cycle_t *cycle, ngx_str_t *value, ngx_log_t *log)
+-{
++ngx_log_target(ngx_conf_t *cf, ngx_str_t *value, ngx_log_t *log)
++{   
++    ngx_cycle_t     *cycle = cf->cycle;
+     ngx_open_pipe_t *pipe_conf;
+ 
+     if (ngx_strncmp(value->data, "syslog:", 7) == 0) {
+@@ -535,7 +535,8 @@
+         value->len -= 7;
+         value->data += 7;
+ 
+-        return ngx_log_set_syslog(cycle->pool, value, log);
++        return ngx_log_set_syslog(cf, value, log);
++
+ #else
+         return NGX_ERROR;
+ #endif
+diff -ruN tengine-2.0.3-orig/src/core/ngx_log.h tengine-2.0.3/src/core/ngx_log.h
+--- tengine-2.0.3-orig/src/core/ngx_log.h	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/core/ngx_log.h	2014-11-21 19:56:48.396131235 +0800
+@@ -51,6 +51,10 @@
+     time_t               next_try;
+     ngx_addr_t           addr;
+     ngx_str_t            syslog_pri;      /* pri field comput for syslog */
++
++    ngx_str_t           syslog_raise1_pri;
++    ngx_str_t           syslog_raise2_pri;
++
+     ngx_str_t            ident;
+ 
+     ngx_socket_t         fd;
+@@ -242,12 +246,14 @@
+ /*********************************/
+ 
+ ngx_log_t *ngx_log_init(u_char *prefix);
+-ngx_log_t *ngx_log_create(ngx_cycle_t *cycle, ngx_str_t *name);
++
++ngx_log_t *ngx_log_create(ngx_conf_t *cf, ngx_str_t *name);
++ngx_int_t ngx_log_target(ngx_conf_t *cf, ngx_str_t *value, ngx_log_t *log);
++
+ char *ngx_log_set_levels(ngx_conf_t *cf, ngx_log_t *log);
+ void ngx_cdecl ngx_log_abort(ngx_err_t err, const char *fmt, ...);
+ void ngx_cdecl ngx_log_stderr(ngx_err_t err, const char *fmt, ...);
+ u_char *ngx_log_errno(u_char *buf, u_char *last, ngx_err_t err);
+-ngx_int_t ngx_log_target(ngx_cycle_t *cycle, ngx_str_t *value, ngx_log_t *log);
+ 
+ 
+ /*
+diff -ruN tengine-2.0.3-orig/src/http/modules/ngx_http_log_module.c tengine-2.0.3/src/http/modules/ngx_http_log_module.c
+--- tengine-2.0.3-orig/src/http/modules/ngx_http_log_module.c	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/http/modules/ngx_http_log_module.c	2014-11-21 20:02:56.168120368 +0800
+@@ -439,12 +439,51 @@
+ 
+ #if (NGX_SYSLOG)
+         if (log[l].syslog != NULL) {
++
++            ngx_str_t       tmp_pri;
++            ngx_uint_t      status;
++
++            tmp_pri.len = 0;
++            status = r->headers_out.status;
++
++            if ( status >= 400 &&
++                (log[l].syslog->syslog_raise1_pri.len > 0 || 
++                 log[l].syslog->syslog_raise2_pri.len > 0))
++            {
++
++                if (log[l].syslog->syslog_raise1_pri.len > 0 &&
++                    log[l].syslog->syslog_raise2_pri.len > 0)  // all set
++                {
++                    tmp_pri = log[l].syslog->syslog_pri;
++                    if (status >= 500) {
++                        log[l].syslog->syslog_pri = log[l].syslog->syslog_raise2_pri;
++                    } else {
++                        log[l].syslog->syslog_pri = log[l].syslog->syslog_raise1_pri;
++                    }
++
++                } else if (log[l].syslog->syslog_raise1_pri.len == 0 &&
++                           log[l].syslog->syslog_raise2_pri.len > 0) // only raiselevel2 set
++                {
++                    if (status >= 500) {
++                        tmp_pri = log[l].syslog->syslog_pri;
++                        log[l].syslog->syslog_pri = log[l].syslog->syslog_raise2_pri;
++                    }
++
++                } else { // raiselevel1 set
++                    tmp_pri = log[l].syslog->syslog_pri;
++                    log[l].syslog->syslog_pri = log[l].syslog->syslog_raise1_pri;
++                }
++            }
++
+             if (!(log[l].syslog->fd == NGX_INVALID_FILE
+                 && ngx_cached_time->sec < log[l].syslog->next_try))
+             {
+                 (void) ngx_write_syslog(log[l].syslog, line, p - line);
+             }
+ 
++            if (tmp_pri.len > 0) {
++                log[l].syslog->syslog_pri = tmp_pri;
++            }
+             continue;
+         }
+ #endif
+@@ -1350,7 +1389,7 @@
+ 
+     ngx_memzero(log, sizeof(ngx_http_log_t));
+ 
+-    rc = ngx_log_target(cf->cycle, &value[1], (ngx_log_t *) log);
++    rc = ngx_log_target(cf, &value[1], (ngx_log_t *) log);
+ 
+     if (rc == NGX_ERROR) {
+         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+diff -ruN tengine-2.0.3-orig/src/http/modules/tfs/ngx_http_tfs_module.c tengine-2.0.3/src/http/modules/tfs/ngx_http_tfs_module.c
+--- tengine-2.0.3-orig/src/http/modules/tfs/ngx_http_tfs_module.c	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/http/modules/tfs/ngx_http_tfs_module.c	2014-11-21 20:02:09.268121754 +0800
+@@ -682,8 +682,7 @@
+     }
+ 
+     value = cf->args->elts;
+-
+-    tscf->log = ngx_log_create(cf->cycle, &value[1]);
++    tscf->log = ngx_log_create(cf, &value[1]);
+     if (tscf->log == NULL) {
+         return NGX_CONF_ERROR;
+     }
+diff -ruN tengine-2.0.3-orig/src/http/ngx_http_core_module.c tengine-2.0.3/src/http/ngx_http_core_module.c
+--- tengine-2.0.3-orig/src/http/ngx_http_core_module.c	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/http/ngx_http_core_module.c	2014-11-21 20:05:58.744114974 +0800
+@@ -5221,7 +5221,7 @@
+         name = value[1];
+     }
+ 
+-    clcf->error_log = ngx_log_create(cf->cycle, &name);
++    clcf->error_log = ngx_log_create(cf, &name);
+     if (clcf->error_log == NULL) {
+         return NGX_CONF_ERROR;
+     }
+diff -ruN tengine-2.0.3-orig/src/misc/ngx_backtrace_module.c tengine-2.0.3/src/misc/ngx_backtrace_module.c
+--- tengine-2.0.3-orig/src/misc/ngx_backtrace_module.c	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/misc/ngx_backtrace_module.c	2014-11-21 20:01:28.064122972 +0800
+@@ -175,8 +175,7 @@
+     if (ngx_conf_full_name(cf->cycle, &file, 1) != NGX_OK) {
+         return NGX_CONF_ERROR;
+     }
+-
+-    log = ngx_log_create(cf->cycle, &file);
++    log = ngx_log_create(cf, &file);
+     if (log == NULL) {
+         return NGX_CONF_ERROR;
+     }
+diff -ruN tengine-2.0.3-orig/src/os/unix/ngx_syslog.c tengine-2.0.3/src/os/unix/ngx_syslog.c
+--- tengine-2.0.3-orig/src/os/unix/ngx_syslog.c	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/os/unix/ngx_syslog.c	2014-11-21 20:00:45.576124227 +0800
+@@ -16,7 +16,6 @@
+  */
+ #define  NGX_SYSLOG_MAX_LENGTH                 2048
+ 
+-
+ static ngx_syslog_code ngx_syslog_priorities[] = {
+     { "alert",   NGX_SYSLOG_ALERT },
+     { "crit",    NGX_SYSLOG_CRIT },
+@@ -132,8 +131,12 @@
+ 
+ 
+ ngx_int_t
+-ngx_log_set_syslog(ngx_pool_t *pool, ngx_str_t *value, ngx_log_t *log)
++ngx_log_set_syslog(ngx_conf_t *cf, ngx_str_t *value, ngx_log_t *log)
+ {
++    ngx_pool_t             *pool = cf->cycle->pool;
++    ngx_int_t              raise_loglevel1, raise_loglevel2;
++    u_char                 *p_next;
++    size_t                 len_next;
+     size_t                 len;
+     u_char                *p, *p_bak, pri[5];
+     ngx_int_t              rc, port, facility, loglevel;
+@@ -144,6 +147,9 @@
+     enum {
+         sw_facility = 0,
+         sw_loglevel,
++
++        sw_raise_loglevel1,
++        sw_raise_loglevel2,
+         sw_address,
+         sw_port,
+         sw_ident,
+@@ -153,6 +159,9 @@
+     p = value->data;
+     facility = -1;
+     loglevel = -1;
++    raise_loglevel1 = -1;
++    raise_loglevel2 = -1;
++
+     ident.len = 0;
+     ident.data = NULL;
+     state = sw_facility;
+@@ -225,6 +234,89 @@
+                 }
+             }
+ 
++            state = sw_raise_loglevel1;
++            break;
++
++        case sw_raise_loglevel1:
++            len = p - p_bak;
++
++            // lookforward
++            if (len == 0) {
++                p_next = p + 1;
++                len_next = 0;
++
++                while (*p_next != ':' && (size_t) (p_next - value->data) < value->len) p_next++;
++                len_next = p_next - p - 1;
++                if (len_next == 0) {
++                    p = p_next;
++                    state = sw_address;
++                    break;
++                }
++                for (i = 0; ngx_syslog_priorities[i].name != NULL; i++) {
++                    if (len_next == strlen(ngx_syslog_priorities[i].name) && 
++                        ngx_strncmp(ngx_syslog_priorities[i].name, p+1, len_next) == 0)
++                    {
++                        state = sw_raise_loglevel2;
++                        break;
++                    }
++                }
++                if (state != sw_raise_loglevel2) {
++                    p = p_bak - 1;
++                    state = sw_address;
++                }
++                
++            } else {
++                for (i = 0; ngx_syslog_priorities[i].name != NULL; i++) {
++                    if (len == strlen(ngx_syslog_priorities[i].name) && 
++                        ngx_strncmp(ngx_syslog_priorities[i].name, p_bak, len) == 0)
++                    {
++                        raise_loglevel1 = ngx_syslog_priorities[i].val;
++                        if (raise_loglevel1 >= loglevel) {
++                            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
++                                "raise_loglevel1 should be higher than loglevel");
++                        }
++                        break;
++                    }
++                }
++
++                if (raise_loglevel1 == -1) {
++                    state = sw_address;
++                    p = p_bak - 1;
++                    /* return NGX_ERROR; */
++
++                } else {
++                    state = sw_raise_loglevel2;
++                }
++                
++            }
++
++            break;
++
++        case sw_raise_loglevel2:
++            len = p - p_bak;
++
++            // len == 0, disabled 
++            if (len > 0) {
++                for (i = 0; ngx_syslog_priorities[i].name != NULL; i++) {
++                    if (len == strlen(ngx_syslog_priorities[i].name) &&
++                        ngx_strncmp(ngx_syslog_priorities[i].name, p_bak, len) == 0)
++                    {
++                        raise_loglevel2 = ngx_syslog_priorities[i].val;
++                        if ((raise_loglevel1 != -1 && raise_loglevel2 >= raise_loglevel1) || 
++                             raise_loglevel2 >= loglevel) 
++                        {
++                            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
++                                "raise_loglevel2 should be higher than loglevel and raiselevel1");
++                        }
++                        break;
++                    }
++                }
++
++                if (raise_loglevel2 == -1) {
++                    return NGX_ERROR;
++                }
++            }
++
+             state = sw_address;
+ 
+             break;
+@@ -334,6 +426,30 @@
+     }
+     ngx_memcpy(log->syslog->syslog_pri.data, pri, p - pri);
+ 
++    if (raise_loglevel1 == -1) {
++        log->syslog->syslog_raise1_pri.len = 0;
++    } else {
++        p = ngx_snprintf(pri, 5, "<%i>", facility + raise_loglevel1);
++        log->syslog->syslog_raise1_pri.len = p - pri;
++        log->syslog->syslog_raise1_pri.data = ngx_pcalloc(pool, p - pri);
++        if (log->syslog->syslog_raise1_pri.data == NULL) {
++            return NGX_ERROR;
++        }
++        ngx_memcpy(log->syslog->syslog_raise1_pri.data, pri, p - pri);
++    }
++    
++    if (raise_loglevel2 == -1) {
++        log->syslog->syslog_raise2_pri.len = 0;
++    } else {
++        p = ngx_snprintf(pri, 5, "<%i>", facility + raise_loglevel2);
++        log->syslog->syslog_raise2_pri.len = p - pri;
++        log->syslog->syslog_raise2_pri.data = ngx_pcalloc(pool, p - pri);
++        if (log->syslog->syslog_raise2_pri.data == NULL) {
++            return NGX_ERROR;
++        }
++        ngx_memcpy(log->syslog->syslog_raise2_pri.data, pri, p - pri);
++    }
++
+     log->syslog->addr = addr;
+     log->syslog->ident = ident;
+     log->syslog->fd = -1;
+diff -ruN tengine-2.0.3-orig/src/os/unix/ngx_syslog.h tengine-2.0.3/src/os/unix/ngx_syslog.h
+--- tengine-2.0.3-orig/src/os/unix/ngx_syslog.h	2014-05-30 19:13:59.000000000 +0800
++++ tengine-2.0.3/src/os/unix/ngx_syslog.h	2014-11-21 20:05:37.836115592 +0800
+@@ -59,8 +59,7 @@
+ 
+ 
+ int ngx_write_syslog(ngx_syslog_t *task, u_char *buf, size_t len);
+-ngx_int_t ngx_log_set_syslog(ngx_pool_t *pool, ngx_str_t *value,
++ngx_int_t ngx_log_set_syslog(ngx_conf_t *cf, ngx_str_t *value,
+     ngx_log_t *log);
+ 
+-
+ #endif /* _NGX_SYSLOG_H_INCLUDED_ */
